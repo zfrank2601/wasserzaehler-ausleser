@@ -1,0 +1,484 @@
+esphome:
+  name: wasserzaehler-ausleser
+
+esp32:
+  board: nodemcu-32s
+  framework:
+    type: arduino
+
+# =======================================================
+# --- KONFIGURATION ---
+# =======================================================
+substitutions:
+  # --- Seriennummern zur automatischen Zuordnung ---
+  kz_expected_serial: '"12345678"' # <--- HIER KALTWASSER-SERIENNUMMER EINTRAGEN!
+  wz_expected_serial: '"87654321"' # <--- HIER WARMWASSER-SERIENNUMMER EINTRAGEN!
+
+  # --- Hardware Pins ---
+  kopf_a_rx_pin: "16"
+  kopf_a_tx_pin: "17"
+  kopf_b_rx_pin: "18"
+  kopf_b_tx_pin: "19"
+
+  # --- Timer Einstellungen ---
+  auto_read_interval: "24h"
+# =======================================================
+
+api:
+  encryption:
+    key: !secret api_password
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+web_server:
+  port: 80
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "Europe/Berlin"
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+
+# =======================================================
+# --- GLOBALS (Übergabe-Parameter an gemeinsames Script)
+# =======================================================
+globals:
+  # Welcher Kopf ist dran? 0 = A (Serial1), 1 = B (Serial2)
+  - id: active_kopf
+    type: int
+    initial_value: "0"
+
+  # RX/TX-Pins des aktiven Kopfes
+  - id: active_rx_pin
+    type: int
+    initial_value: "16"
+  - id: active_tx_pin
+    type: int
+    initial_value: "17"
+
+# =======================================================
+# --- SCHALTER ---
+# =======================================================
+switch:
+  - platform: template
+    name: "Automatisches Auslesen (${auto_read_interval})"
+    id: auto_read_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:timer-sync"
+    entity_category: config
+
+  - platform: template
+    name: "M-Bus Debug Logging"
+    id: debug_logging
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:bug"
+    entity_category: config
+
+# =======================================================
+# --- BUTTONS ---
+# =======================================================
+button:
+  - platform: template
+    name: "Lesekopf A Auslesen (Manuell)"
+    id: btn_read_a
+    entity_category: config
+    on_press:
+      - script.execute: read_kopf_a
+
+  - platform: template
+    name: "Lesekopf B Auslesen (Manuell)"
+    id: btn_read_b
+    entity_category: config
+    on_press:
+      - script.execute: read_kopf_b
+
+# =======================================================
+# --- SENSOREN (Numerisch) ---
+# =======================================================
+sensor:
+  - platform: template
+    name: "Kaltwasser Volumen"
+    id: kz_volume
+    unit_of_measurement: "m³"
+    accuracy_decimals: 3
+    device_class: water
+    state_class: total_increasing
+  - platform: template
+    name: "Kaltwasser Stichtag Volumen"
+    id: kz_target_volume
+    unit_of_measurement: "m³"
+    accuracy_decimals: 3
+    device_class: water
+  - platform: template
+    name: "Kaltwasser Fehlercode"
+    id: kz_error
+    accuracy_decimals: 0
+  - platform: template
+    name: "Kaltwasser Zugriffsanzahl"
+    id: kz_access_count
+    accuracy_decimals: 0
+    icon: "mdi:counter"
+
+  - platform: template
+    name: "Warmwasser Volumen"
+    id: wz_volume
+    unit_of_measurement: "m³"
+    accuracy_decimals: 3
+    device_class: water
+    state_class: total_increasing
+  - platform: template
+    name: "Warmwasser Stichtag Volumen"
+    id: wz_target_volume
+    unit_of_measurement: "m³"
+    accuracy_decimals: 3
+    device_class: water
+  - platform: template
+    name: "Warmwasser Fehlercode"
+    id: wz_error
+    accuracy_decimals: 0
+  - platform: template
+    name: "Warmwasser Zugriffsanzahl"
+    id: wz_access_count
+    accuracy_decimals: 0
+    icon: "mdi:counter"
+
+# =======================================================
+# --- SENSOREN (Text) ---
+# =======================================================
+text_sensor:
+  - platform: template
+    name: "Lesekopf A Status"
+    id: kopf_a_status
+    icon: "mdi:information-outline"
+    entity_category: diagnostic
+  - platform: template
+    name: "Lesekopf B Status"
+    id: kopf_b_status
+    icon: "mdi:information-outline"
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Kaltwasser Letzter Abruf"
+    id: kz_last_read
+  - platform: template
+    name: "Kaltwasser Seriennummer"
+    id: kz_serial
+  - platform: template
+    name: "Kaltwasser Stichtag Datum"
+    id: kz_target_date
+
+  - platform: template
+    name: "Warmwasser Letzter Abruf"
+    id: wz_last_read
+  - platform: template
+    name: "Warmwasser Seriennummer"
+    id: wz_serial
+  - platform: template
+    name: "Warmwasser Stichtag Datum"
+    id: wz_target_date
+
+# =======================================================
+# --- AUTOMATISCHES AUSLESEN ---
+# =======================================================
+interval:
+  - interval: ${auto_read_interval}
+    then:
+      - if:
+          condition:
+            - switch.is_on: auto_read_switch
+          then:
+            - if:
+                condition:
+                  - switch.is_on: debug_logging
+                then:
+                  - logger.log: "START AUTOMATISCHER ABRUF..."
+            - script.execute: read_kopf_a
+            - delay: 10s
+            - script.execute: read_kopf_b
+
+# =======================================================
+# --- SCRIPTE ---
+# =======================================================
+script:
+  # ---------------------------------------------------
+  # Lesekopf A: setzt Parameter, delegiert an gemeinsames Script
+  # ---------------------------------------------------
+  - id: read_kopf_a
+    mode: single
+    then:
+      - lambda: |-
+          id(active_kopf)   = 0;
+          id(active_rx_pin) = ${kopf_a_rx_pin};
+          id(active_tx_pin) = ${kopf_a_tx_pin};
+          id(kopf_a_status).publish_state("Starte Auslesung...");
+      - script.execute: mbus_read_and_parse
+
+  # ---------------------------------------------------
+  # Lesekopf B: setzt Parameter, delegiert an gemeinsames Script
+  # ---------------------------------------------------
+  - id: read_kopf_b
+    mode: single
+    then:
+      - lambda: |-
+          id(active_kopf)   = 1;
+          id(active_rx_pin) = ${kopf_b_rx_pin};
+          id(active_tx_pin) = ${kopf_b_tx_pin};
+          id(kopf_b_status).publish_state("Starte Auslesung...");
+      - script.execute: mbus_read_and_parse
+
+  # ---------------------------------------------------
+  # GEMEINSAME AUSLESE- UND PARSE-LOGIK
+  # ---------------------------------------------------
+  - id: mbus_read_and_parse
+    mode: single
+    then:
+      # ---- Phase 1: Wakeup senden (8N1) ----
+      - lambda: |-
+          int rx = id(active_rx_pin);
+          int tx = id(active_tx_pin);
+          const char* tag = (id(active_kopf) == 0) ? "M-BUS-A" : "M-BUS-B";
+
+          if (id(debug_logging).state) ESP_LOGD(tag, "Sende Wakeup (8N1)...");
+
+          pinMode(tx, OUTPUT);
+          digitalWrite(tx, HIGH);
+
+          if (id(active_kopf) == 0) {
+            Serial1.end(); delay(10);
+            Serial1.setRxBufferSize(1024);
+            Serial1.begin(2400, SERIAL_8N1, rx, tx);
+            while (Serial1.available()) Serial1.read();
+            uint8_t wakeup[25]; memset(wakeup, 0x55, 25);
+            // ACHTUNG: Mindestens 30 Iterationen (3,12s) für EN 13757-3
+            for (int i = 0; i < 30; i++) Serial1.write(wakeup, 25);
+            Serial1.flush();
+          } else {
+            Serial2.end(); delay(10);
+            Serial2.setRxBufferSize(1024);
+            Serial2.begin(2400, SERIAL_8N1, rx, tx);
+            while (Serial2.available()) Serial2.read();
+            uint8_t wakeup[25]; memset(wakeup, 0x55, 25);
+            for (int i = 0; i < 30; i++) Serial2.write(wakeup, 25);
+            Serial2.flush();
+          }
+
+      - delay: 1.5s
+
+      # ---- Phase 2: Request senden (8E1) ----
+      - lambda: |-
+          int rx = id(active_rx_pin);
+          int tx = id(active_tx_pin);
+          const char* tag = (id(active_kopf) == 0) ? "M-BUS-A" : "M-BUS-B";
+
+          if (id(debug_logging).state) ESP_LOGD(tag, "Sende Request (8E1)...");
+
+          // Request: REQ_UD2 an Broadcast-Adresse 0xFE
+          uint8_t req[] = {0x10, 0x7B, 0xFE, 0x79, 0x16};
+
+          if (id(active_kopf) == 0) {
+            Serial1.end(); delay(10);
+            Serial1.begin(2400, SERIAL_8E1, rx, tx);
+            delay(50); while (Serial1.available()) Serial1.read();
+            Serial1.write(req, 5); Serial1.flush();
+            delay(50);
+            int n = 0; while (Serial1.available() && n < 5) { Serial1.read(); n++; }
+          } else {
+            Serial2.end(); delay(10);
+            Serial2.begin(2400, SERIAL_8E1, rx, tx);
+            delay(50); while (Serial2.available()) Serial2.read();
+            Serial2.write(req, 5); Serial2.flush();
+            delay(50);
+            int n = 0; while (Serial2.available() && n < 5) { Serial2.read(); n++; }
+          }
+
+      - delay: 2.0s
+
+      # ---- Phase 3: Antwort lesen & parsen ----
+      - lambda: |-
+          const char* tag = (id(active_kopf) == 0) ? "M-BUS-A" : "M-BUS-B";
+          if (id(debug_logging).state) ESP_LOGD(tag, "Lese Antwort...");
+
+          std::vector<uint8_t> raw_resp;
+          if (id(active_kopf) == 0) {
+            while (Serial1.available()) raw_resp.push_back(Serial1.read());
+          } else {
+            while (Serial2.available()) raw_resp.push_back(Serial2.read());
+          }
+
+          if (id(debug_logging).state && raw_resp.size() > 0) {
+            ESP_LOGD(tag, ">>> RAW (%d Bytes):", raw_resp.size());
+            std::string hex_str;
+            for (int k = 0; k < (int)raw_resp.size(); k++) {
+              char buf[4]; sprintf(buf, "%02X ", raw_resp[k]);
+              hex_str += buf;
+              if ((k + 1) % 16 == 0) { ESP_LOGD(tag, "  %s", hex_str.c_str()); hex_str = ""; }
+            }
+            if (!hex_str.empty()) ESP_LOGD(tag, "  %s", hex_str.c_str());
+          }
+
+          int start_idx = -1;
+          int frame_len = -1;
+          for (int i = 0; i + 3 < (int)raw_resp.size(); i++) {
+            if (raw_resp[i] == 0x68
+                && raw_resp[i+1] == raw_resp[i+2]
+                && raw_resp[i+3] == 0x68) {
+              int declared_len = raw_resp[i+1];
+              if (i + 4 + declared_len + 1 <= (int)raw_resp.size()
+                  && raw_resp[i + 4 + declared_len + 1] == 0x16) {
+                start_idx = i;
+                frame_len  = declared_len;
+                break;
+              }
+            }
+          }
+
+          if (start_idx == -1) {
+            if (id(debug_logging).state)
+              ESP_LOGW(tag, "Kein gueltiger M-Bus Rahmen (68 L L 68 ... 16) gefunden!");
+            if (id(active_kopf) == 0) id(kopf_a_status).publish_state("Fehler: Keine / falsche Antwort");
+            else                      id(kopf_b_status).publish_state("Fehler: Keine / falsche Antwort");
+            return;
+          }
+
+          {
+            uint8_t cs_calc = 0;
+            for (int i = start_idx + 4; i < start_idx + 4 + frame_len; i++)
+              cs_calc += raw_resp[i];
+            uint8_t cs_recv = raw_resp[start_idx + 4 + frame_len];
+            if (cs_calc != cs_recv) {
+              ESP_LOGW(tag, "Checksummen-Fehler! Berechnet: 0x%02X, Empfangen: 0x%02X", cs_calc, cs_recv);
+              if (id(active_kopf) == 0) id(kopf_a_status).publish_state("Fehler: Checksumme");
+              else                      id(kopf_b_status).publish_state("Fehler: Checksumme");
+              return;
+            }
+            if (id(debug_logging).state) ESP_LOGD(tag, "Checksumme OK (0x%02X)", cs_calc);
+          }
+
+          std::vector<uint8_t> resp(raw_resp.begin() + start_idx,
+                                    raw_resp.begin() + start_idx + 4 + frame_len + 2);
+
+          std::string current_serial = "";
+          if ((int)resp.size() > 10) {
+            char ser_buf[16];
+            sprintf(ser_buf, "%02X%02X%02X%02X", resp[10], resp[9], resp[8], resp[7]);
+            current_serial = ser_buf;
+          }
+
+          int temp_access = ((int)resp.size() > 15) ? resp[15] : -1;
+
+          float temp_vol        = -1.0f;
+          float temp_target_vol = -1.0f;
+          std::string temp_target_date = "";
+          int temp_error = -1;
+
+          int p = 19;
+          while (p < resp.size() - 2) {
+            uint8_t dif = resp[p++];
+            if (dif == 0x0F) break;
+
+            uint8_t df = dif & 0x0F;
+            int len = 0;
+            if (df==1) len=1; else if (df==2) len=2; else if (df==3) len=3; 
+            else if (df==4 || df==5) len=4; else if (df==6) len=6; else if (df==7) len=8;
+
+            uint8_t storage = (dif >> 6) & 0x01;
+            int bit_pos = 1;
+            bool has_dife = (dif & 0x80) != 0;
+            while (has_dife && p < resp.size() - 2) {
+              uint8_t dife = resp[p++];
+              storage |= ((dife >> 6) & 0x01) << bit_pos;
+              bit_pos++;
+              has_dife = (dife & 0x80) != 0;
+            }
+
+            if (p >= resp.size() - 2) break;
+            uint8_t vif = resp[p++];
+            uint8_t vif_clean = vif & 0x7F;
+            uint8_t vife = 0;
+            bool has_vife = (vif & 0x80) != 0;
+
+            if (has_vife && p < resp.size() - 2) {
+              vife = resp[p++];
+              has_vife = (vife & 0x80) != 0;
+              while (has_vife && p < resp.size() - 2) {
+                uint8_t temp = resp[p++];
+                has_vife = (temp & 0x80) != 0;
+              }
+            }
+
+            if (p + len > resp.size() - 2) break;
+
+            if (len == 4 && vif_clean == 0x13) {
+               uint32_t val = resp[p] | (resp[p+1]<<8) | (resp[p+2]<<16) | (resp[p+3]<<24);
+               if (storage == 0) temp_vol = val / 1000.0;
+               else if (storage == 1) temp_target_vol = val / 1000.0;
+            }
+            else if (len == 2 && vif_clean == 0x6C && storage == 1) {
+               uint8_t b0 = resp[p];
+               uint8_t b1 = resp[p+1];
+               int yr = 2000 + ((b0 >> 5) | ((b1 & 0xF0) >> 1));
+               int mo = b1 & 0x0F;
+               int dy = b0 & 0x1F;
+               char buf[20]; sprintf(buf, "%04d-%02d-%02d", yr, mo, dy);
+               temp_target_date = buf;
+            }
+            else if (len == 2 && vif_clean == 0x7D && (vife & 0x7F) == 0x17 && storage == 0) {
+               temp_error = resp[p] | (resp[p+1]<<8);
+            }
+            p += len;
+          }
+
+          auto time_now = id(sntp_time).now();
+          char time_buf[30] = "";
+          if (time_now.is_valid())
+            time_now.strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S");
+
+          auto publish_to_kz = [&]() {
+            id(kz_serial).publish_state(current_serial);
+            if (temp_access >= 0)     id(kz_access_count).publish_state(temp_access);
+            if (temp_vol >= 0)        id(kz_volume).publish_state(temp_vol);
+            if (temp_target_vol >= 0) id(kz_target_volume).publish_state(temp_target_vol);
+            if (temp_target_date != "") id(kz_target_date).publish_state(temp_target_date);
+            if (temp_error >= 0)      id(kz_error).publish_state(temp_error);
+            if (time_buf[0] != '\0')  id(kz_last_read).publish_state(time_buf);
+          };
+          auto publish_to_wz = [&]() {
+            id(wz_serial).publish_state(current_serial);
+            if (temp_access >= 0)     id(wz_access_count).publish_state(temp_access);
+            if (temp_vol >= 0)        id(wz_volume).publish_state(temp_vol);
+            if (temp_target_vol >= 0) id(wz_target_volume).publish_state(temp_target_vol);
+            if (temp_target_date != "") id(wz_target_date).publish_state(temp_target_date);
+            if (temp_error >= 0)      id(wz_error).publish_state(temp_error);
+            if (time_buf[0] != '\0')  id(wz_last_read).publish_state(time_buf);
+          };
+
+          if (current_serial == ${kz_expected_serial}) {
+            if (id(debug_logging).state) ESP_LOGD(tag, "Zuordnung: Kaltwasserzaehler (%s)", current_serial.c_str());
+            if (id(active_kopf) == 0) id(kopf_a_status).publish_state("OK -> Kaltwasser");
+            else                      id(kopf_b_status).publish_state("OK -> Kaltwasser");
+            publish_to_kz();
+          }
+          else if (current_serial == ${wz_expected_serial}) {
+            if (id(debug_logging).state) ESP_LOGD(tag, "Zuordnung: Warmwasserzaehler (%s)", current_serial.c_str());
+            if (id(active_kopf) == 0) id(kopf_a_status).publish_state("OK -> Warmwasser");
+            else                      id(kopf_b_status).publish_state("OK -> Warmwasser");
+            publish_to_wz();
+          }
+          else {
+            ESP_LOGW(tag, "Unbekannter Zaehler! Seriennummer: %s", current_serial.c_str());
+            if (id(active_kopf) == 0) id(kopf_a_status).publish_state("Fehler: Unbekannter Zaehler");
+            else                      id(kopf_b_status).publish_state("Fehler: Unbekannter Zaehler");
+          }
