@@ -31,8 +31,17 @@ Hinweis: Lasse zwischen dem Auslesen von Kopf A und Kopf B in deinen Automatione
 
 📊 Ausgelesene Werte
 Der ESP32 parst das rohe M-Bus-Telegramm und stellt folgende Entitäten in Home Assistant bereit:
-  -  Aktuelles Volumen (m³)
-  -  Stichtag Datum & Stichtag Volumen
-  -  Interne Zugriffsanzahl des Zählers
-  -  Fehlercodes
-  -  Raw-Telegramm (Hex) für Debugging-Zwecke
+* Aktuelles Volumen (m³)
+* Stichtag Datum & Stichtag Volumen
+* Interne Zugriffsanzahl des Zählers
+* Fehlercodes
+* Raw-Telegramm (Hex) für Debugging-Zwecke
+
+## 📸 Screenshots
+
+### Home Assistant
+![Homeassistant](screenshot1.jpg)
+![Homeassistant](screenshot2.jpg)
+
+### ESPHome Webinterface
+![Screenshot des ESPHome Webinterfaces mit geparsten Werten](screenshot3.jpg)
